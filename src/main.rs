@@ -8,6 +8,7 @@ use std::{
     collections::{HashMap, HashSet},
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
+    str::FromStr,
     sync::Arc,
     time::{Duration as StdDuration, Instant},
 };
@@ -41,9 +42,21 @@ struct Args {
     #[arg(long, value_enum, default_value_t = PlotMetric::Code)]
     plot_metric: PlotMetric,
 
+    /// Plot top N languages
+    #[arg(long, default_value_t = 8)]
+    plot_top: usize,
+
+    /// Only include selected languages (repeatable or comma-separated)
+    #[arg(long, value_delimiter = ',', value_name = "LANG")]
+    only: Vec<String>,
+
     /// Only include files under this subdir (repo-relative, e.g. "src/")
     #[arg(long)]
     subdir: Option<PathBuf>,
+
+    /// Disable the progress bar
+    #[arg(long)]
+    no_progress: bool,
 
     /// Max blob size (bytes) to feed into tokei (guardrail). Default: 50MB
     #[arg(long, default_value_t = 50 * 1024 * 1024)]
@@ -364,11 +377,16 @@ fn write_commit_rows<W: Write>(
     commit_oid: Oid,
     t: git2::Time,
     totals: &LangMap,
+    only_langs: Option<&HashSet<LanguageType>>,
 ) -> Result<()> {
     let ts = t.seconds().to_string();
     let dt = format_git_time(t);
 
-    let mut items: Vec<(LanguageType, Counts)> = totals.iter().map(|(k, v)| (*k, *v)).collect();
+    let mut items: Vec<(LanguageType, Counts)> = totals
+        .iter()
+        .filter(|(lang, _)| only_langs.map_or(true, |set| set.contains(lang)))
+        .map(|(k, v)| (*k, *v))
+        .collect();
     items.sort_by_key(|(lang, _)| lang.name().to_string());
 
     for (lang, c) in items {
@@ -395,6 +413,7 @@ fn run_first_parent<W: Write>(
     mut plot_data: Option<&mut PlotData>,
     wtr: &mut csv::Writer<W>,
     progress: Option<&ProgressBar>,
+    only_langs: Option<&HashSet<LanguageType>>,
     subdir: Option<&Path>,
     plot_metric: PlotMetric,
     max_bytes: usize,
@@ -437,10 +456,10 @@ fn run_first_parent<W: Write>(
         )?;
 
         if let Some(buf) = plot_data.as_deref_mut() {
-            buf.push_snapshot(commit.time().seconds(), &totals, plot_metric, None);
+            buf.push_snapshot(commit.time().seconds(), &totals, plot_metric, only_langs);
         }
 
-        write_commit_rows(wtr, oid, commit.time(), &totals)?;
+        write_commit_rows(wtr, oid, commit.time(), &totals, only_langs)?;
         if let Some(pb) = progress {
             pb.inc(1);
         }
@@ -458,6 +477,7 @@ fn write_plot(
     path: &Path,
     title: &str,
     metric: PlotMetric,
+    plot_top: usize,
     plot_data: &PlotData,
     final_totals: &LangMap,
 ) -> Result<()> {
@@ -471,6 +491,7 @@ fn write_plot(
 
     let mut langs: Vec<(LanguageType, i64)> = final_totals
         .iter()
+        .filter(|(lang, _)| plot_data.series.contains_key(*lang))
         .map(|(lang, c)| (*lang, c.metric(metric)))
         .filter(|(_, lines)| *lines > 0)
         .collect();
@@ -478,7 +499,7 @@ fn write_plot(
 
     let top_langs: Vec<LanguageType> = langs
         .into_iter()
-        .take(8)
+        .take(plot_top)
         .map(|(lang, _)| lang)
         .collect();
     if top_langs.is_empty() {
@@ -619,6 +640,22 @@ fn main() -> Result<()> {
     let tokei_cfg = TokeiConfig::default();
     let mut blob_cache: HashMap<BlobKey, Arc<LangMap>> = HashMap::new();
 
+    let only_langs = if args.only.is_empty() {
+        None
+    } else {
+        let mut set = HashSet::new();
+        for raw in &args.only {
+            let name = raw.trim();
+            if name.is_empty() {
+                continue;
+            }
+            let lang = LanguageType::from_str(name)
+                .map_err(|_| anyhow::anyhow!("unknown language \"{name}\""))?;
+            set.insert(lang);
+        }
+        Some(set)
+    };
+
     let subdir = match args.subdir.as_ref() {
         Some(raw) => {
             let normalized = normalize_subdir(raw)?;
@@ -655,7 +692,7 @@ fn main() -> Result<()> {
 
     let mut plot_data: Option<PlotData> = args.plot.as_ref().map(|_| PlotData::default());
 
-    let progress = if io::stderr().is_terminal() {
+    let progress = if !args.no_progress && io::stderr().is_terminal() {
         let pb = ProgressBar::new(0);
         pb.set_draw_target(ProgressDrawTarget::stderr_with_hz(8));
         pb.set_style(
@@ -681,6 +718,7 @@ fn main() -> Result<()> {
         plot_data.as_mut(),
         &mut wtr,
         progress.as_ref(),
+        only_langs.as_ref(),
         subdir.as_deref(),
         args.plot_metric,
         args.max_bytes,
@@ -697,7 +735,14 @@ fn main() -> Result<()> {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("git-loc");
-            write_plot(plot_path, repo_name, args.plot_metric, data, &final_totals)?;
+            write_plot(
+                plot_path,
+                repo_name,
+                args.plot_metric,
+                args.plot_top,
+                data,
+                &final_totals,
+            )?;
         }
     }
     let plot_elapsed = plot_start.elapsed();
