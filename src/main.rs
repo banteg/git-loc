@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, FixedOffset, TimeZone, Utc};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use git2::{DiffOptions, FileMode, Oid, Repository};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use plotters::prelude::*;
@@ -37,6 +37,10 @@ struct Args {
     #[arg(long)]
     plot: Option<PathBuf>,
 
+    /// Plot metric (code, lines, comments, blanks)
+    #[arg(long, value_enum, default_value_t = PlotMetric::Code)]
+    plot_metric: PlotMetric,
+
     /// Only include files under this subdir (repo-relative, e.g. "src/")
     #[arg(long)]
     subdir: Option<PathBuf>,
@@ -60,9 +64,36 @@ impl Counts {
     fn lines(&self) -> i64 {
         self.code + self.comments + self.blanks
     }
+    fn metric(&self, metric: PlotMetric) -> i64 {
+        match metric {
+            PlotMetric::Code => self.code,
+            PlotMetric::Lines => self.lines(),
+            PlotMetric::Comments => self.comments,
+            PlotMetric::Blanks => self.blanks,
+        }
+    }
 }
 
 type LangMap = HashMap<LanguageType, Counts>;
+
+#[derive(ValueEnum, Debug, Clone, Copy)]
+enum PlotMetric {
+    Code,
+    Lines,
+    Comments,
+    Blanks,
+}
+
+impl PlotMetric {
+    fn label(self) -> &'static str {
+        match self {
+            PlotMetric::Code => "code lines",
+            PlotMetric::Lines => "lines",
+            PlotMetric::Comments => "comment lines",
+            PlotMetric::Blanks => "blank lines",
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 struct Snapshot {
@@ -388,7 +419,7 @@ fn run_first_parent<W: Write>(
     Ok(chain_len)
 }
 
-fn write_plot(path: &Path, title: &str, snapshots: &[Snapshot]) -> Result<()> {
+fn write_plot(path: &Path, title: &str, metric: PlotMetric, snapshots: &[Snapshot]) -> Result<()> {
     if snapshots.is_empty() {
         return Ok(());
     }
@@ -403,7 +434,7 @@ fn write_plot(path: &Path, title: &str, snapshots: &[Snapshot]) -> Result<()> {
     let mut langs: Vec<(LanguageType, i64)> = last
         .totals
         .iter()
-        .map(|(lang, c)| (*lang, c.lines()))
+        .map(|(lang, c)| (*lang, c.metric(metric)))
         .filter(|(_, lines)| *lines > 0)
         .collect();
     langs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.name().cmp(b.0.name())));
@@ -451,7 +482,7 @@ fn write_plot(path: &Path, title: &str, snapshots: &[Snapshot]) -> Result<()> {
             let lines = snapshot
                 .totals
                 .get(lang)
-                .map(|c| c.lines())
+                .map(|c| c.metric(metric))
                 .unwrap_or(0);
             y_max = y_max.max(lines);
         }
@@ -465,7 +496,7 @@ fn write_plot(path: &Path, title: &str, snapshots: &[Snapshot]) -> Result<()> {
 
     let mut chart = ChartBuilder::on(&root)
         .margin(20)
-        .caption(format!("{title} lines over time"), ("sans-serif", 26))
+        .caption(format!("{title} {} over time", metric.label()), ("sans-serif", 26))
         .x_label_area_size(45)
         .y_label_area_size(70)
         .build_cartesian_2d(start_dt..end_dt, 0i64..y_max)?;
@@ -486,7 +517,7 @@ fn write_plot(path: &Path, title: &str, snapshots: &[Snapshot]) -> Result<()> {
             let lines = snapshot
                 .totals
                 .get(lang)
-                .map(|c| c.lines())
+                .map(|c| c.metric(metric))
                 .unwrap_or(0);
             if let Some((last_ts, last_lines)) = samples.last_mut() {
                 if *last_ts == *ts {
@@ -632,7 +663,7 @@ fn main() -> Result<()> {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("git-loc");
-            write_plot(plot_path, repo_name, data)?;
+            write_plot(plot_path, repo_name, args.plot_metric, data)?;
         }
     }
     let plot_elapsed = plot_start.elapsed();
