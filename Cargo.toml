@@ -2,6 +2,13 @@
 name = "git-loc"
 version = "0.1.0"
 edition = "2021"
+authors = ["banteg"]
+description = "Per-language SLOC time series from git history using git blobs + tokei"
+license = "MIT"
+repository = "https://github.com/banteg/git-loc"
+readme = "readme.md"
+keywords = ["git", "sloc", "tokei", "metrics"]
+categories = ["development-tools"]
 
 [dependencies]
 anyhow = "1"
