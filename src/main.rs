@@ -36,6 +36,10 @@ struct Args {
     #[arg(long)]
     plot: Option<PathBuf>,
 
+    /// Only include files under this subdir (repo-relative, e.g. "src/")
+    #[arg(long)]
+    subdir: Option<PathBuf>,
+
     /// Max blob size (bytes) to feed into tokei (guardrail). Default: 50MB
     #[arg(long, default_value_t = 50 * 1024 * 1024)]
     max_bytes: usize,
@@ -76,6 +80,30 @@ fn is_countable_mode(mode: FileMode) -> bool {
         mode,
         FileMode::Blob | FileMode::BlobExecutable | FileMode::BlobGroupWritable
     )
+}
+
+fn normalize_subdir(subdir: &Path) -> Result<PathBuf> {
+    use std::path::Component;
+
+    let mut out = PathBuf::new();
+    for component in subdir.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => out.push(part),
+            Component::ParentDir => {
+                anyhow::bail!("subdir must not contain '..' components")
+            }
+            Component::RootDir | Component::Prefix(_) => {}
+        }
+    }
+    Ok(out)
+}
+
+fn path_allowed(path: &Path, subdir: Option<&Path>) -> bool {
+    match subdir {
+        Some(prefix) => prefix.as_os_str().is_empty() || path.starts_with(prefix),
+        None => true,
+    }
 }
 
 fn format_git_time(t: git2::Time) -> String {
@@ -196,6 +224,7 @@ fn apply_tree_diff(
     totals: &mut LangMap,
     old_tree: Option<&git2::Tree>,
     new_tree: &git2::Tree,
+    subdir: Option<&Path>,
     max_bytes: usize,
 ) -> Result<()> {
     let mut opts = DiffOptions::new();
@@ -216,6 +245,9 @@ fn apply_tree_diff(
         // Old side: subtract counts if it "exists" and is a normal blob.
         if oldf.exists() && is_countable_mode(oldf.mode()) {
             if let Some(p) = oldf.path() {
+                if !path_allowed(p, subdir) {
+                    continue;
+                }
                 if let Some(name) = p.file_name() {
                     let filename = name.to_string_lossy();
                     let counts = blob_lang_counts(
@@ -235,6 +267,9 @@ fn apply_tree_diff(
         // New side: add counts if it "exists" and is a normal blob.
         if newf.exists() && is_countable_mode(newf.mode()) {
             if let Some(p) = newf.path() {
+                if !path_allowed(p, subdir) {
+                    continue;
+                }
                 if let Some(name) = p.file_name() {
                     let filename = name.to_string_lossy();
                     let counts = blob_lang_counts(
@@ -292,6 +327,7 @@ fn run_first_parent<W: Write>(
     blob_cache: &mut HashMap<BlobKey, Arc<LangMap>>,
     mut plot_data: Option<&mut Vec<Snapshot>>,
     wtr: &mut csv::Writer<W>,
+    subdir: Option<&Path>,
     max_bytes: usize,
 ) -> Result<usize> {
     // Build the first-parent chain (OIDs), then reverse so we apply diffs root->tip.
@@ -322,6 +358,7 @@ fn run_first_parent<W: Write>(
             &mut totals,
             prev_tree.as_ref(),
             &tree,
+            subdir,
             max_bytes,
         )?;
 
@@ -506,6 +543,18 @@ fn main() -> Result<()> {
     let tokei_cfg = TokeiConfig::default();
     let mut blob_cache: HashMap<BlobKey, Arc<LangMap>> = HashMap::new();
 
+    let subdir = match args.subdir.as_ref() {
+        Some(raw) => {
+            let normalized = normalize_subdir(raw)?;
+            if normalized.as_os_str().is_empty() {
+                None
+            } else {
+                Some(normalized)
+            }
+        }
+        None => None,
+    };
+
     // Output writer
     let out: Box<dyn Write> = if args.out == "-" {
         Box::new(io::stdout())
@@ -539,6 +588,7 @@ fn main() -> Result<()> {
         &mut blob_cache,
         plot_data.as_mut(),
         &mut wtr,
+        subdir.as_deref(),
         args.max_bytes,
     )?;
 
