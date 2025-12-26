@@ -1,0 +1,13 @@
+[package]
+name = "git-tokei-timeseries"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+csv = "1"
+chrono = "0.4"
+git2 = "0.20"
+tempfile = "3"
+tokei = { version = "13", default-features = false }
