@@ -166,6 +166,21 @@ struct DiffCtx<'a> {
     max_bytes: usize,
 }
 
+struct RunCtx<'a, W: Write> {
+    repo: &'a Repository,
+    tip: Oid,
+    tmpdir: &'a Path,
+    tokei_cfg: &'a TokeiConfig,
+    blob_cache: &'a mut HashMap<BlobKey, Arc<LangMap>>,
+    plot_data: Option<&'a mut PlotData>,
+    wtr: &'a mut csv::Writer<W>,
+    progress: Option<&'a ProgressBar>,
+    only_langs: Option<&'a HashSet<LanguageType>>,
+    subdir: Option<&'a Path>,
+    plot_metric: PlotMetric,
+    max_bytes: usize,
+}
+
 fn is_countable_mode(mode: FileMode) -> bool {
     matches!(
         mode,
@@ -415,23 +430,10 @@ fn write_commit_rows<W: Write>(
     Ok(())
 }
 
-fn run_first_parent<W: Write>(
-    repo: &Repository,
-    tip: Oid,
-    tmpdir: &Path,
-    tokei_cfg: &TokeiConfig,
-    blob_cache: &mut HashMap<BlobKey, Arc<LangMap>>,
-    mut plot_data: Option<&mut PlotData>,
-    wtr: &mut csv::Writer<W>,
-    progress: Option<&ProgressBar>,
-    only_langs: Option<&HashSet<LanguageType>>,
-    subdir: Option<&Path>,
-    plot_metric: PlotMetric,
-    max_bytes: usize,
-) -> Result<(usize, LangMap)> {
+fn run_first_parent<W: Write>(ctx: &mut RunCtx<'_, W>) -> Result<(usize, LangMap)> {
     // Build the first-parent chain (OIDs), then reverse so we apply diffs root->tip.
     let mut chain: Vec<Oid> = Vec::new();
-    let mut cur = repo.find_commit(tip)?;
+    let mut cur = ctx.repo.find_commit(ctx.tip)?;
     loop {
         chain.push(cur.id());
         if cur.parent_count() == 0 {
@@ -441,7 +443,7 @@ fn run_first_parent<W: Write>(
     }
     chain.reverse();
     let chain_len = chain.len();
-    if let Some(pb) = progress {
+    if let Some(pb) = ctx.progress {
         pb.set_length(chain_len as u64);
         pb.set_position(0);
         pb.set_message("processing commits");
@@ -451,33 +453,33 @@ fn run_first_parent<W: Write>(
     let mut prev_tree: Option<git2::Tree> = None;
 
     for oid in chain {
-        let commit = repo.find_commit(oid)?;
+        let commit = ctx.repo.find_commit(oid)?;
         let tree = commit.tree()?;
 
         {
             let mut diff_ctx = DiffCtx {
-                repo,
-                tmpdir,
-                tokei_cfg,
-                blob_cache,
-                subdir,
-                max_bytes,
+                repo: ctx.repo,
+                tmpdir: ctx.tmpdir,
+                tokei_cfg: ctx.tokei_cfg,
+                blob_cache: ctx.blob_cache,
+                subdir: ctx.subdir,
+                max_bytes: ctx.max_bytes,
             };
             apply_tree_diff(&mut diff_ctx, &mut totals, prev_tree.as_ref(), &tree)?;
         }
 
-        if let Some(buf) = plot_data.as_deref_mut() {
-            buf.push_snapshot(commit.time().seconds(), &totals, plot_metric, only_langs);
+        if let Some(buf) = ctx.plot_data.as_deref_mut() {
+            buf.push_snapshot(commit.time().seconds(), &totals, ctx.plot_metric, ctx.only_langs);
         }
 
-        write_commit_rows(wtr, oid, commit.time(), &totals, only_langs)?;
-        if let Some(pb) = progress {
+        write_commit_rows(ctx.wtr, oid, commit.time(), &totals, ctx.only_langs)?;
+        if let Some(pb) = ctx.progress {
             pb.inc(1);
         }
         prev_tree = Some(tree);
     }
 
-    if let Some(pb) = progress {
+    if let Some(pb) = ctx.progress {
         pb.finish_and_clear();
     }
 
@@ -727,20 +729,23 @@ fn main() -> Result<()> {
     };
 
     let run_start = Instant::now();
-    let (commit_count, final_totals) = run_first_parent(
-        &repo,
-        tip,
-        tmpdir,
-        &tokei_cfg,
-        &mut blob_cache,
-        plot_data.as_mut(),
-        &mut wtr,
-        progress.as_ref(),
-        only_langs.as_ref(),
-        subdir.as_deref(),
-        args.plot_metric,
-        args.max_bytes,
-    )?;
+    let (commit_count, final_totals) = {
+        let mut ctx = RunCtx {
+            repo: &repo,
+            tip,
+            tmpdir,
+            tokei_cfg: &tokei_cfg,
+            blob_cache: &mut blob_cache,
+            plot_data: plot_data.as_mut(),
+            wtr: &mut wtr,
+            progress: progress.as_ref(),
+            only_langs: only_langs.as_ref(),
+            subdir: subdir.as_deref(),
+            plot_metric: args.plot_metric,
+            max_bytes: args.max_bytes,
+        };
+        run_first_parent(&mut ctx)?
+    };
 
     wtr.flush()?;
     let run_elapsed = run_start.elapsed();
