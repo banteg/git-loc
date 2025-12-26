@@ -15,7 +15,7 @@ use tempfile::TempDir;
 use tokei::{CodeStats, Config as TokeiConfig, LanguageType, Languages};
 
 #[derive(Parser, Debug)]
-#[command(name = "git-tokei-timeseries")]
+#[command(name = "git-loc")]
 #[command(
     about = "Per-language SLOC time series using git blobs + tokei (first-parent chain only)",
     long_about = None
