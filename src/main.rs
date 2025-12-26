@@ -157,6 +157,15 @@ struct BlobKey {
     filename: String, // basename only (what tokei uses for detection)
 }
 
+struct DiffCtx<'a> {
+    repo: &'a Repository,
+    tmpdir: &'a Path,
+    tokei_cfg: &'a TokeiConfig,
+    blob_cache: &'a mut HashMap<BlobKey, Arc<LangMap>>,
+    subdir: Option<&'a Path>,
+    max_bytes: usize,
+}
+
 fn is_countable_mode(mode: FileMode) -> bool {
     matches!(
         mode,
@@ -305,19 +314,15 @@ fn blob_lang_counts(
 }
 
 fn apply_tree_diff(
-    repo: &Repository,
-    tmpdir: &Path,
-    tokei_cfg: &TokeiConfig,
-    blob_cache: &mut HashMap<BlobKey, Arc<LangMap>>,
+    ctx: &mut DiffCtx<'_>,
     totals: &mut LangMap,
     old_tree: Option<&git2::Tree>,
     new_tree: &git2::Tree,
-    subdir: Option<&Path>,
-    max_bytes: usize,
 ) -> Result<()> {
     let mut opts = DiffOptions::new();
     // You can tune diff options here; defaults are usually fine for tree-to-tree diffs.
-    let diff = repo
+    let diff = ctx
+        .repo
         .diff_tree_to_tree(old_tree, Some(new_tree), Some(&mut opts))
         .context("diff_tree_to_tree")?;
 
@@ -333,17 +338,17 @@ fn apply_tree_diff(
         // Old side: subtract counts if it "exists" and is a normal blob.
         if oldf.exists() && is_countable_mode(oldf.mode()) {
             if let Some(p) = oldf.path() {
-                if path_allowed(p, subdir) {
+                if path_allowed(p, ctx.subdir) {
                     if let Some(name) = p.file_name() {
                         let filename = name.to_string_lossy();
                         let counts = blob_lang_counts(
-                            repo,
-                            tmpdir,
-                            tokei_cfg,
-                            blob_cache,
+                            ctx.repo,
+                            ctx.tmpdir,
+                            ctx.tokei_cfg,
+                            ctx.blob_cache,
                             oldf.id(),
                             &filename,
-                            max_bytes,
+                            ctx.max_bytes,
                         )?;
                         map_sub(totals, &counts);
                     }
@@ -354,17 +359,17 @@ fn apply_tree_diff(
         // New side: add counts if it "exists" and is a normal blob.
         if newf.exists() && is_countable_mode(newf.mode()) {
             if let Some(p) = newf.path() {
-                if path_allowed(p, subdir) {
+                if path_allowed(p, ctx.subdir) {
                     if let Some(name) = p.file_name() {
                         let filename = name.to_string_lossy();
                         let counts = blob_lang_counts(
-                            repo,
-                            tmpdir,
-                            tokei_cfg,
-                            blob_cache,
+                            ctx.repo,
+                            ctx.tmpdir,
+                            ctx.tokei_cfg,
+                            ctx.blob_cache,
                             newf.id(),
                             &filename,
-                            max_bytes,
+                            ctx.max_bytes,
                         )?;
                         map_add(totals, &counts);
                     }
@@ -449,17 +454,17 @@ fn run_first_parent<W: Write>(
         let commit = repo.find_commit(oid)?;
         let tree = commit.tree()?;
 
-        apply_tree_diff(
-            repo,
-            tmpdir,
-            tokei_cfg,
-            blob_cache,
-            &mut totals,
-            prev_tree.as_ref(),
-            &tree,
-            subdir,
-            max_bytes,
-        )?;
+        {
+            let mut diff_ctx = DiffCtx {
+                repo,
+                tmpdir,
+                tokei_cfg,
+                blob_cache,
+                subdir,
+                max_bytes,
+            };
+            apply_tree_diff(&mut diff_ctx, &mut totals, prev_tree.as_ref(), &tree)?;
+        }
 
         if let Some(buf) = plot_data.as_deref_mut() {
             buf.push_snapshot(commit.time().seconds(), &totals, plot_metric, only_langs);
