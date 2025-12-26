@@ -2,13 +2,14 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, FixedOffset, TimeZone, Utc};
 use clap::Parser;
 use git2::{DiffOptions, FileMode, Oid, Repository};
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use plotters::prelude::*;
 use std::{
     collections::HashMap,
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     sync::Arc,
-    time::Instant,
+    time::{Duration as StdDuration, Instant},
 };
 use tempfile::TempDir;
 use tokei::{CodeStats, Config as TokeiConfig, LanguageType, Languages};
@@ -327,6 +328,7 @@ fn run_first_parent<W: Write>(
     blob_cache: &mut HashMap<BlobKey, Arc<LangMap>>,
     mut plot_data: Option<&mut Vec<Snapshot>>,
     wtr: &mut csv::Writer<W>,
+    progress: Option<&ProgressBar>,
     subdir: Option<&Path>,
     max_bytes: usize,
 ) -> Result<usize> {
@@ -342,6 +344,11 @@ fn run_first_parent<W: Write>(
     }
     chain.reverse();
     let chain_len = chain.len();
+    if let Some(pb) = progress {
+        pb.set_length(chain_len as u64);
+        pb.set_position(0);
+        pb.set_message("processing commits");
+    }
 
     let mut totals: LangMap = LangMap::new();
     let mut prev_tree: Option<git2::Tree> = None;
@@ -370,7 +377,14 @@ fn run_first_parent<W: Write>(
         }
 
         write_commit_rows(wtr, oid, commit.time(), &totals)?;
+        if let Some(pb) = progress {
+            pb.inc(1);
+        }
         prev_tree = Some(tree);
+    }
+
+    if let Some(pb) = progress {
+        pb.finish_and_clear();
     }
 
     Ok(chain_len)
@@ -579,6 +593,22 @@ fn main() -> Result<()> {
 
     let mut plot_data: Option<Vec<Snapshot>> = args.plot.as_ref().map(|_| Vec::new());
 
+    let progress = if io::stderr().is_terminal() {
+        let pb = ProgressBar::new(0);
+        pb.set_draw_target(ProgressDrawTarget::stderr_with_hz(8));
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.green} {msg} [{bar:40.cyan/blue}] {pos}/{len} {elapsed} ETA {eta}",
+            )
+            .unwrap()
+            .progress_chars("=>-"),
+        );
+        pb.enable_steady_tick(StdDuration::from_millis(120));
+        Some(pb)
+    } else {
+        None
+    };
+
     let run_start = Instant::now();
     let commit_count = run_first_parent(
         &repo,
@@ -588,6 +618,7 @@ fn main() -> Result<()> {
         &mut blob_cache,
         plot_data.as_mut(),
         &mut wtr,
+        progress.as_ref(),
         subdir.as_deref(),
         args.max_bytes,
     )?;
