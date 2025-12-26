@@ -1,9 +1,9 @@
 [package]
 name = "git-loc"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["banteg"]
-description = "Per-language SLOC time series from git history using git blobs + tokei"
+description = "Per-language lines of code time series from git history using git blobs + tokei"
 license = "MIT"
 repository = "https://github.com/banteg/git-loc"
 readme = "readme.md"
