@@ -191,7 +191,8 @@ fn path_allowed(path: &Path, subdir: Option<&Path>) -> bool {
 fn format_git_time(t: git2::Time) -> String {
     let secs = t.seconds();
     let offset_seconds = t.offset_minutes() * 60;
-    let offset = FixedOffset::east_opt(offset_seconds).unwrap_or_else(|| FixedOffset::east_opt(0).unwrap());
+    let offset =
+        FixedOffset::east_opt(offset_seconds).unwrap_or_else(|| FixedOffset::east_opt(0).unwrap());
 
     let naive = DateTime::<Utc>::from_timestamp(secs, 0)
         .unwrap_or_else(|| DateTime::<Utc>::from_timestamp(0, 0).unwrap())
@@ -268,8 +269,7 @@ fn blob_lang_counts(
         .with_context(|| format!("write temp file {:?}", tmp_path))?;
 
     let mut languages = Languages::new();
-    // Signature may be () or Result<...>; using let _ avoids must_use warnings either way.
-    let _ = languages.get_statistics(&[tmp_path.as_path()], &[], tokei_cfg);
+    languages.get_statistics(&[tmp_path.as_path()], &[], tokei_cfg);
 
     // Ensure totals are computed.
     for (_, lang) in languages.iter_mut() {
@@ -282,7 +282,13 @@ fn blob_lang_counts(
         for report in &lang.reports {
             let stats = &report.stats;
             // Primary stats for the file's language.
-            add_to_map(&mut totals, *lang_type, stats.code, stats.comments, stats.blanks);
+            add_to_map(
+                &mut totals,
+                *lang_type,
+                stats.code,
+                stats.comments,
+                stats.blanks,
+            );
             // Embedded languages.
             for (child_lang, child_stats) in &stats.blobs {
                 add_codestats_recursive(&mut totals, *child_lang, child_stats);
@@ -553,7 +559,10 @@ fn write_plot(
 
     let mut chart = ChartBuilder::on(&root)
         .margin(20)
-        .caption(format!("{title} {} over time", metric.label()), ("sans-serif", 26))
+        .caption(
+            format!("{title} {} over time", metric.label()),
+            ("sans-serif", 26),
+        )
         .x_label_area_size(45)
         .y_label_area_size(70)
         .build_cartesian_2d(start_dt..end_dt, 0i64..y_max)?;
@@ -570,7 +579,11 @@ fn write_plot(
     for (idx, lang) in top_langs.iter().enumerate() {
         let color = Palette99::pick(idx).stroke_width(2);
         let mut samples: Vec<(i64, i64)> = Vec::with_capacity(ordered.len());
-        let series = plot_data.series.get(lang).map(|v| v.as_slice()).unwrap_or(&[]);
+        let series = plot_data
+            .series
+            .get(lang)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
         for (ts, idx) in &ordered {
             let value = series.get(*idx).copied().unwrap_or(0);
             if let Some((last_ts, last_value)) = samples.last_mut() {
