@@ -41,10 +41,30 @@ git-loc --repo .
 git-loc --repo . --out sloc.csv --plot sloc.svg
 ```
 
+### Plot options
+
+```bash
+# Use code/comments/blanks/lines for the plot metric
+git-loc --repo . --out sloc.csv --plot sloc.svg --plot-metric code
+
+# Plot top 5 languages
+git-loc --repo . --out sloc.csv --plot sloc.svg --plot-top 5
+
+# Only include selected languages (repeatable or comma-separated)
+git-loc --repo . --out sloc.csv --plot sloc.svg --only Python --only "Jinja2"
+git-loc --repo . --out sloc.csv --plot sloc.svg --only Python,Jinja2
+```
+
 ### Only count a subdirectory
 
 ```bash
 git-loc --repo . --subdir src --out sloc.csv --plot sloc.svg
+```
+
+### Disable the progress bar
+
+```bash
+git-loc --repo . --no-progress
 ```
 
 ## Output format
@@ -66,7 +86,14 @@ This long format is convenient for plotting.
 
 ## Plot
 
-`--plot <path.svg>` writes an SVG chart of the top 8 languages ranked by totals at the final commit.
+`--plot <path.svg>` writes an SVG chart of the top languages ranked by totals at the final commit.
+
+Plot-related flags:
+
+- `--plot-metric code|lines|comments|blanks` (default: `code`)
+- `--plot-top N` (default: `8`)
+- `--only <LANG>` repeatable or comma-separated
+- `--no-progress` disables the progress bar on stderr
 
 ## How it works
 
