@@ -390,7 +390,7 @@ fn write_commit_rows<W: Write>(
 
     let mut items: Vec<(LanguageType, Counts)> = totals
         .iter()
-        .filter(|(lang, _)| only_langs.map_or(true, |set| set.contains(lang)))
+        .filter(|(lang, _)| only_langs.is_none_or(|set| set.contains(lang)))
         .map(|(k, v)| (*k, *v))
         .collect();
     items.sort_by_key(|(lang, _)| lang.name().to_string());
