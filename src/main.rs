@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
-use chrono::{FixedOffset, NaiveDateTime, TimeZone};
-use clap::{Parser, ValueEnum};
-use git2::{DiffOptions, FileMode, Oid, Repository, Sort};
+use chrono::{DateTime, FixedOffset, TimeZone, Utc};
+use clap::Parser;
+use git2::{DiffOptions, FileMode, Oid, Repository};
 use std::{
     collections::HashMap,
     io::{self, Write},
@@ -13,7 +13,10 @@ use tokei::{CodeStats, Config as TokeiConfig, LanguageType, Languages};
 
 #[derive(Parser, Debug)]
 #[command(name = "git-tokei-timeseries")]
-#[command(about = "Per-language SLOC time series using git blobs + tokei", long_about = None)]
+#[command(
+    about = "Per-language SLOC time series using git blobs + tokei (first-parent chain only)",
+    long_about = None
+)]
 struct Args {
     /// Path to the git repo (default: .)
     #[arg(long, default_value = ".")]
@@ -23,12 +26,6 @@ struct Args {
     #[arg(long, default_value = "HEAD")]
     rev: String,
 
-    /// Walk mode:
-    /// - all: all commits reachable from rev (uses first parent as diff base per commit)
-    /// - first-parent: only the first-parent chain (linear history)
-    #[arg(long, value_enum, default_value_t = Mode::All)]
-    mode: Mode,
-
     /// Output CSV path, or "-" for stdout
     #[arg(long, default_value = "-")]
     out: String,
@@ -36,12 +33,6 @@ struct Args {
     /// Max blob size (bytes) to feed into tokei (guardrail). Default: 50MB
     #[arg(long, default_value_t = 50 * 1024 * 1024)]
     max_bytes: usize,
-}
-
-#[derive(ValueEnum, Clone, Copy, Debug)]
-enum Mode {
-    All,
-    FirstParent,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -80,8 +71,9 @@ fn format_git_time(t: git2::Time) -> String {
     let offset_seconds = t.offset_minutes() * 60;
     let offset = FixedOffset::east_opt(offset_seconds).unwrap_or_else(|| FixedOffset::east_opt(0).unwrap());
 
-    let naive = NaiveDateTime::from_timestamp_opt(secs, 0)
-        .unwrap_or_else(|| NaiveDateTime::from_timestamp_opt(0, 0).unwrap());
+    let naive = DateTime::<Utc>::from_timestamp(secs, 0)
+        .unwrap_or_else(|| DateTime::<Utc>::from_timestamp(0, 0).unwrap())
+        .naive_utc();
 
     offset.from_utc_datetime(&naive).to_rfc3339()
 }
@@ -326,102 +318,6 @@ fn run_first_parent<W: Write>(
     Ok(())
 }
 
-fn run_all<W: Write>(
-    repo: &Repository,
-    tip: Oid,
-    tmpdir: &Path,
-    tokei_cfg: &TokeiConfig,
-    blob_cache: &mut HashMap<BlobKey, Arc<LangMap>>,
-    wtr: &mut csv::Writer<W>,
-    max_bytes: usize,
-) -> Result<()> {
-    // We want parents-before-children order so each commit's first parent is already processed.
-    let mut revwalk = repo.revwalk()?;
-    revwalk.push(tip)?;
-    revwalk.set_sorting(Sort::TOPOLOGICAL | Sort::REVERSE)?;
-
-    // First pass: collect commit list + first-parent relation + child counts.
-    let mut commits: Vec<Oid> = Vec::new();
-    let mut first_parent: HashMap<Oid, Option<Oid>> = HashMap::new();
-    let mut remaining_children: HashMap<Oid, usize> = HashMap::new();
-
-    for oid_res in revwalk {
-        let oid = oid_res?;
-        commits.push(oid);
-
-        let c = repo.find_commit(oid)?;
-        let p = if c.parent_count() > 0 {
-            Some(c.parent_id(0)?)
-        } else {
-            None
-        };
-        first_parent.insert(oid, p);
-
-        if let Some(parent_oid) = p {
-            *remaining_children.entry(parent_oid).or_insert(0) += 1;
-        }
-    }
-
-    // Second pass: DP over first-parent edges.
-    // Store only commits that still have unprocessed children.
-    let mut totals_store: HashMap<Oid, LangMap> = HashMap::new();
-
-    for oid in commits {
-        let commit = repo.find_commit(oid)?;
-        let tree = commit.tree()?;
-
-        let parent_oid_opt = *first_parent
-            .get(&oid)
-            .expect("first_parent map should have every commit");
-
-        let mut totals: LangMap = if let Some(parent_oid) = parent_oid_opt {
-            totals_store
-                .get(&parent_oid)
-                .with_context(|| format!("missing totals for parent {parent_oid}"))?
-                .clone()
-        } else {
-            LangMap::new()
-        };
-
-        let parent_tree = if let Some(parent_oid) = parent_oid_opt {
-            Some(repo.find_commit(parent_oid)?.tree()?)
-        } else {
-            None
-        };
-
-        apply_tree_diff(
-            repo,
-            tmpdir,
-            tokei_cfg,
-            blob_cache,
-            &mut totals,
-            parent_tree.as_ref(),
-            &tree,
-            max_bytes,
-        )?;
-
-        write_commit_rows(wtr, oid, commit.time(), &totals)?;
-
-        // This commit only needs to be stored if it has children.
-        let child_count = remaining_children.get(&oid).copied().unwrap_or(0);
-        if child_count > 0 {
-            totals_store.insert(oid, totals);
-        }
-
-        // We just consumed one child of our parent (if any); maybe drop the parent totals.
-        if let Some(parent_oid) = parent_oid_opt {
-            if let Some(cnt) = remaining_children.get_mut(&parent_oid) {
-                *cnt = cnt.saturating_sub(1);
-                if *cnt == 0 {
-                    totals_store.remove(&parent_oid);
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -464,26 +360,15 @@ fn main() -> Result<()> {
         "lines",
     ])?;
 
-    match args.mode {
-        Mode::FirstParent => run_first_parent(
-            &repo,
-            tip,
-            tmpdir,
-            &tokei_cfg,
-            &mut blob_cache,
-            &mut wtr,
-            args.max_bytes,
-        )?,
-        Mode::All => run_all(
-            &repo,
-            tip,
-            tmpdir,
-            &tokei_cfg,
-            &mut blob_cache,
-            &mut wtr,
-            args.max_bytes,
-        )?,
-    }
+    run_first_parent(
+        &repo,
+        tip,
+        tmpdir,
+        &tokei_cfg,
+        &mut blob_cache,
+        &mut wtr,
+        args.max_bytes,
+    )?;
 
     wtr.flush()?;
     Ok(())
