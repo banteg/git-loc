@@ -5,7 +5,7 @@ use git2::{DiffOptions, FileMode, Oid, Repository};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use plotters::prelude::*;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     sync::Arc,
@@ -95,10 +95,47 @@ impl PlotMetric {
     }
 }
 
-#[derive(Debug, Clone)]
-struct Snapshot {
-    ts: i64,
-    totals: LangMap,
+#[derive(Debug, Default)]
+struct PlotData {
+    times: Vec<i64>,
+    series: HashMap<LanguageType, Vec<i64>>,
+}
+
+impl PlotData {
+    fn push_snapshot(
+        &mut self,
+        ts: i64,
+        totals: &LangMap,
+        metric: PlotMetric,
+        only: Option<&HashSet<LanguageType>>,
+    ) {
+        let idx = self.times.len();
+        self.times.push(ts);
+
+        for (lang, values) in self.series.iter_mut() {
+            let value = totals.get(lang).map(|c| c.metric(metric)).unwrap_or(0);
+            values.push(value);
+        }
+
+        let mut new_langs = Vec::new();
+        for lang in totals.keys() {
+            if let Some(only_langs) = only {
+                if !only_langs.contains(lang) {
+                    continue;
+                }
+            }
+            if !self.series.contains_key(lang) {
+                new_langs.push(*lang);
+            }
+        }
+
+        for lang in new_langs {
+            let value = totals.get(&lang).map(|c| c.metric(metric)).unwrap_or(0);
+            let mut values = vec![0; idx];
+            values.push(value);
+            self.series.insert(lang, values);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -355,12 +392,13 @@ fn run_first_parent<W: Write>(
     tmpdir: &Path,
     tokei_cfg: &TokeiConfig,
     blob_cache: &mut HashMap<BlobKey, Arc<LangMap>>,
-    mut plot_data: Option<&mut Vec<Snapshot>>,
+    mut plot_data: Option<&mut PlotData>,
     wtr: &mut csv::Writer<W>,
     progress: Option<&ProgressBar>,
     subdir: Option<&Path>,
+    plot_metric: PlotMetric,
     max_bytes: usize,
-) -> Result<usize> {
+) -> Result<(usize, LangMap)> {
     // Build the first-parent chain (OIDs), then reverse so we apply diffs root->tip.
     let mut chain: Vec<Oid> = Vec::new();
     let mut cur = repo.find_commit(tip)?;
@@ -399,10 +437,7 @@ fn run_first_parent<W: Write>(
         )?;
 
         if let Some(buf) = plot_data.as_deref_mut() {
-            buf.push(Snapshot {
-                ts: commit.time().seconds(),
-                totals: totals.clone(),
-            });
+            buf.push_snapshot(commit.time().seconds(), &totals, plot_metric, None);
         }
 
         write_commit_rows(wtr, oid, commit.time(), &totals)?;
@@ -416,11 +451,17 @@ fn run_first_parent<W: Write>(
         pb.finish_and_clear();
     }
 
-    Ok(chain_len)
+    Ok((chain_len, totals))
 }
 
-fn write_plot(path: &Path, title: &str, metric: PlotMetric, snapshots: &[Snapshot]) -> Result<()> {
-    if snapshots.is_empty() {
+fn write_plot(
+    path: &Path,
+    title: &str,
+    metric: PlotMetric,
+    plot_data: &PlotData,
+    final_totals: &LangMap,
+) -> Result<()> {
+    if plot_data.times.is_empty() {
         return Ok(());
     }
 
@@ -428,11 +469,7 @@ fn write_plot(path: &Path, title: &str, metric: PlotMetric, snapshots: &[Snapsho
         anyhow::bail!("plot output must be a file path (SVG), not stdout");
     }
 
-    let last = snapshots
-        .last()
-        .expect("snapshots is non-empty by construction");
-    let mut langs: Vec<(LanguageType, i64)> = last
-        .totals
+    let mut langs: Vec<(LanguageType, i64)> = final_totals
         .iter()
         .map(|(lang, c)| (*lang, c.metric(metric)))
         .filter(|(_, lines)| *lines > 0)
@@ -448,20 +485,22 @@ fn write_plot(path: &Path, title: &str, metric: PlotMetric, snapshots: &[Snapsho
         return Ok(());
     }
 
-    let mut ordered: Vec<(i64, usize, &Snapshot)> = snapshots
+    let mut ordered: Vec<(i64, usize)> = plot_data
+        .times
         .iter()
+        .copied()
         .enumerate()
-        .map(|(idx, snapshot)| (snapshot.ts, idx, snapshot))
+        .map(|(idx, ts)| (ts, idx))
         .collect();
     ordered.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
 
     let start_ts = ordered
         .first()
-        .expect("snapshots is non-empty by construction")
+        .expect("plot data is non-empty by construction")
         .0;
     let end_ts = ordered
         .last()
-        .expect("snapshots is non-empty by construction")
+        .expect("plot data is non-empty by construction")
         .0;
 
     let start_dt = Utc
@@ -477,14 +516,11 @@ fn write_plot(path: &Path, title: &str, metric: PlotMetric, snapshots: &[Snapsho
     }
 
     let mut y_max: i64 = 0;
-    for snapshot in snapshots {
-        for lang in &top_langs {
-            let lines = snapshot
-                .totals
-                .get(lang)
-                .map(|c| c.metric(metric))
-                .unwrap_or(0);
-            y_max = y_max.max(lines);
+    for lang in &top_langs {
+        if let Some(series) = plot_data.series.get(lang) {
+            for value in series {
+                y_max = y_max.max(*value);
+            }
         }
     }
     if y_max <= 0 {
@@ -513,40 +549,37 @@ fn write_plot(path: &Path, title: &str, metric: PlotMetric, snapshots: &[Snapsho
     for (idx, lang) in top_langs.iter().enumerate() {
         let color = Palette99::pick(idx).stroke_width(2);
         let mut samples: Vec<(i64, i64)> = Vec::with_capacity(ordered.len());
-        for (ts, _, snapshot) in &ordered {
-            let lines = snapshot
-                .totals
-                .get(lang)
-                .map(|c| c.metric(metric))
-                .unwrap_or(0);
-            if let Some((last_ts, last_lines)) = samples.last_mut() {
+        let series = plot_data.series.get(lang).map(|v| v.as_slice()).unwrap_or(&[]);
+        for (ts, idx) in &ordered {
+            let value = series.get(*idx).copied().unwrap_or(0);
+            if let Some((last_ts, last_value)) = samples.last_mut() {
                 if *last_ts == *ts {
-                    *last_lines = lines;
+                    *last_value = value;
                     continue;
                 }
             }
-            samples.push((*ts, lines));
+            samples.push((*ts, value));
         }
 
         let mut step_points: Vec<(DateTime<Utc>, i64)> =
             Vec::with_capacity(samples.len().saturating_mul(2));
-        if let Some((first_ts, first_lines)) = samples.first().copied() {
+        if let Some((first_ts, first_value)) = samples.first().copied() {
             let first_dt = Utc
                 .timestamp_opt(first_ts, 0)
                 .single()
                 .unwrap_or_else(|| Utc.timestamp_opt(0, 0).unwrap());
-            step_points.push((first_dt, first_lines));
+            step_points.push((first_dt, first_value));
             for window in samples.windows(2) {
-                let (prev_ts, prev_lines) = window[0];
-                let (cur_ts, cur_lines) = window[1];
+                let (prev_ts, prev_value) = window[0];
+                let (cur_ts, cur_value) = window[1];
                 let cur_dt = Utc
                     .timestamp_opt(cur_ts, 0)
                     .single()
                     .unwrap_or_else(|| Utc.timestamp_opt(0, 0).unwrap());
                 if cur_ts != prev_ts {
-                    step_points.push((cur_dt, prev_lines));
+                    step_points.push((cur_dt, prev_value));
                 }
-                step_points.push((cur_dt, cur_lines));
+                step_points.push((cur_dt, cur_value));
             }
         }
 
@@ -620,7 +653,7 @@ fn main() -> Result<()> {
         "lines",
     ])?;
 
-    let mut plot_data: Option<Vec<Snapshot>> = args.plot.as_ref().map(|_| Vec::new());
+    let mut plot_data: Option<PlotData> = args.plot.as_ref().map(|_| PlotData::default());
 
     let progress = if io::stderr().is_terminal() {
         let pb = ProgressBar::new(0);
@@ -639,7 +672,7 @@ fn main() -> Result<()> {
     };
 
     let run_start = Instant::now();
-    let commit_count = run_first_parent(
+    let (commit_count, final_totals) = run_first_parent(
         &repo,
         tip,
         tmpdir,
@@ -649,6 +682,7 @@ fn main() -> Result<()> {
         &mut wtr,
         progress.as_ref(),
         subdir.as_deref(),
+        args.plot_metric,
         args.max_bytes,
     )?;
 
@@ -663,7 +697,7 @@ fn main() -> Result<()> {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("git-loc");
-            write_plot(plot_path, repo_name, args.plot_metric, data)?;
+            write_plot(plot_path, repo_name, args.plot_metric, data, &final_totals)?;
         }
     }
     let plot_elapsed = plot_start.elapsed();
