@@ -246,21 +246,20 @@ fn apply_tree_diff(
         // Old side: subtract counts if it "exists" and is a normal blob.
         if oldf.exists() && is_countable_mode(oldf.mode()) {
             if let Some(p) = oldf.path() {
-                if !path_allowed(p, subdir) {
-                    continue;
-                }
-                if let Some(name) = p.file_name() {
-                    let filename = name.to_string_lossy();
-                    let counts = blob_lang_counts(
-                        repo,
-                        tmpdir,
-                        tokei_cfg,
-                        blob_cache,
-                        oldf.id(),
-                        &filename,
-                        max_bytes,
-                    )?;
-                    map_sub(totals, &counts);
+                if path_allowed(p, subdir) {
+                    if let Some(name) = p.file_name() {
+                        let filename = name.to_string_lossy();
+                        let counts = blob_lang_counts(
+                            repo,
+                            tmpdir,
+                            tokei_cfg,
+                            blob_cache,
+                            oldf.id(),
+                            &filename,
+                            max_bytes,
+                        )?;
+                        map_sub(totals, &counts);
+                    }
                 }
             }
         }
@@ -268,21 +267,20 @@ fn apply_tree_diff(
         // New side: add counts if it "exists" and is a normal blob.
         if newf.exists() && is_countable_mode(newf.mode()) {
             if let Some(p) = newf.path() {
-                if !path_allowed(p, subdir) {
-                    continue;
-                }
-                if let Some(name) = p.file_name() {
-                    let filename = name.to_string_lossy();
-                    let counts = blob_lang_counts(
-                        repo,
-                        tmpdir,
-                        tokei_cfg,
-                        blob_cache,
-                        newf.id(),
-                        &filename,
-                        max_bytes,
-                    )?;
-                    map_add(totals, &counts);
+                if path_allowed(p, subdir) {
+                    if let Some(name) = p.file_name() {
+                        let filename = name.to_string_lossy();
+                        let counts = blob_lang_counts(
+                            repo,
+                            tmpdir,
+                            tokei_cfg,
+                            blob_cache,
+                            newf.id(),
+                            &filename,
+                            max_bytes,
+                        )?;
+                        map_add(totals, &counts);
+                    }
                 }
             }
         }
