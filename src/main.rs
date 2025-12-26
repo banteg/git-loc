@@ -8,6 +8,7 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
     sync::Arc,
+    time::Instant,
 };
 use tempfile::TempDir;
 use tokei::{CodeStats, Config as TokeiConfig, LanguageType, Languages};
@@ -292,7 +293,7 @@ fn run_first_parent<W: Write>(
     mut plot_data: Option<&mut Vec<Snapshot>>,
     wtr: &mut csv::Writer<W>,
     max_bytes: usize,
-) -> Result<()> {
+) -> Result<usize> {
     // Build the first-parent chain (OIDs), then reverse so we apply diffs root->tip.
     let mut chain: Vec<Oid> = Vec::new();
     let mut cur = repo.find_commit(tip)?;
@@ -304,6 +305,7 @@ fn run_first_parent<W: Write>(
         cur = cur.parent(0)?;
     }
     chain.reverse();
+    let chain_len = chain.len();
 
     let mut totals: LangMap = LangMap::new();
     let mut prev_tree: Option<git2::Tree> = None;
@@ -334,10 +336,10 @@ fn run_first_parent<W: Write>(
         prev_tree = Some(tree);
     }
 
-    Ok(())
+    Ok(chain_len)
 }
 
-fn write_plot(path: &Path, snapshots: &[Snapshot]) -> Result<()> {
+fn write_plot(path: &Path, title: &str, snapshots: &[Snapshot]) -> Result<()> {
     if snapshots.is_empty() {
         return Ok(());
     }
@@ -366,11 +368,21 @@ fn write_plot(path: &Path, snapshots: &[Snapshot]) -> Result<()> {
         return Ok(());
     }
 
-    let start_ts = snapshots
+    let mut ordered: Vec<(i64, usize, &Snapshot)> = snapshots
+        .iter()
+        .enumerate()
+        .map(|(idx, snapshot)| (snapshot.ts, idx, snapshot))
+        .collect();
+    ordered.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+    let start_ts = ordered
         .first()
         .expect("snapshots is non-empty by construction")
-        .ts;
-    let end_ts = last.ts;
+        .0;
+    let end_ts = ordered
+        .last()
+        .expect("snapshots is non-empty by construction")
+        .0;
 
     let start_dt = Utc
         .timestamp_opt(start_ts, 0)
@@ -404,7 +416,7 @@ fn write_plot(path: &Path, snapshots: &[Snapshot]) -> Result<()> {
 
     let mut chart = ChartBuilder::on(&root)
         .margin(20)
-        .caption("git-loc lines over time", ("sans-serif", 26))
+        .caption(format!("{title} lines over time"), ("sans-serif", 26))
         .x_label_area_size(45)
         .y_label_area_size(70)
         .build_cartesian_2d(start_dt..end_dt, 0i64..y_max)?;
@@ -420,21 +432,46 @@ fn write_plot(path: &Path, snapshots: &[Snapshot]) -> Result<()> {
 
     for (idx, lang) in top_langs.iter().enumerate() {
         let color = Palette99::pick(idx).stroke_width(2);
-        let series = snapshots.iter().map(|snapshot| {
-            let dt = Utc
-                .timestamp_opt(snapshot.ts, 0)
-                .single()
-                .unwrap_or_else(|| Utc.timestamp_opt(0, 0).unwrap());
+        let mut samples: Vec<(i64, i64)> = Vec::with_capacity(ordered.len());
+        for (ts, _, snapshot) in &ordered {
             let lines = snapshot
                 .totals
                 .get(lang)
                 .map(|c| c.lines())
                 .unwrap_or(0);
-            (dt, lines)
-        });
+            if let Some((last_ts, last_lines)) = samples.last_mut() {
+                if *last_ts == *ts {
+                    *last_lines = lines;
+                    continue;
+                }
+            }
+            samples.push((*ts, lines));
+        }
+
+        let mut step_points: Vec<(DateTime<Utc>, i64)> =
+            Vec::with_capacity(samples.len().saturating_mul(2));
+        if let Some((first_ts, first_lines)) = samples.first().copied() {
+            let first_dt = Utc
+                .timestamp_opt(first_ts, 0)
+                .single()
+                .unwrap_or_else(|| Utc.timestamp_opt(0, 0).unwrap());
+            step_points.push((first_dt, first_lines));
+            for window in samples.windows(2) {
+                let (prev_ts, prev_lines) = window[0];
+                let (cur_ts, cur_lines) = window[1];
+                let cur_dt = Utc
+                    .timestamp_opt(cur_ts, 0)
+                    .single()
+                    .unwrap_or_else(|| Utc.timestamp_opt(0, 0).unwrap());
+                if cur_ts != prev_ts {
+                    step_points.push((cur_dt, prev_lines));
+                }
+                step_points.push((cur_dt, cur_lines));
+            }
+        }
 
         chart
-            .draw_series(LineSeries::new(series, color))?
+            .draw_series(LineSeries::new(step_points, color))?
             .label(lang.name().to_string())
             .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], color));
     }
@@ -493,7 +530,8 @@ fn main() -> Result<()> {
 
     let mut plot_data: Option<Vec<Snapshot>> = args.plot.as_ref().map(|_| Vec::new());
 
-    run_first_parent(
+    let run_start = Instant::now();
+    let commit_count = run_first_parent(
         &repo,
         tip,
         tmpdir,
@@ -505,12 +543,35 @@ fn main() -> Result<()> {
     )?;
 
     wtr.flush()?;
+    let run_elapsed = run_start.elapsed();
 
+    let plot_start = Instant::now();
     if let Some(plot_path) = args.plot.as_ref() {
         if let Some(data) = plot_data.as_ref() {
-            write_plot(plot_path, data)?;
+            let repo_dir = repo.workdir().unwrap_or_else(|| repo.path());
+            let repo_name = repo_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("git-loc");
+            write_plot(plot_path, repo_name, data)?;
         }
     }
+    let plot_elapsed = plot_start.elapsed();
+
+    let total_elapsed = run_start.elapsed();
+    let run_secs = run_elapsed.as_secs_f64();
+    let commits_per_sec = if run_secs > 0.0 {
+        commit_count as f64 / run_secs
+    } else {
+        0.0
+    };
+    eprintln!(
+        "git-loc: processed {commit_count} commits in {:.2}s ({:.2} commits/s); plot {:.2}s; total {:.2}s",
+        run_elapsed.as_secs_f64(),
+        commits_per_sec,
+        plot_elapsed.as_secs_f64(),
+        total_elapsed.as_secs_f64()
+    );
 
     Ok(())
 }
