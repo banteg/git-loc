@@ -573,7 +573,7 @@ fn write_plot(
         .y_labels(10)
         .x_label_formatter(&|dt| dt.format("%Y-%m-%d").to_string())
         .y_label_formatter(&|v| v.to_string())
-        .light_line_style(&WHITE.mix(0.2))
+        .light_line_style(WHITE.mix(0.2))
         .draw()?;
 
     for (idx, lang) in top_langs.iter().enumerate() {
@@ -626,7 +626,7 @@ fn write_plot(
     chart
         .configure_series_labels()
         .background_style(WHITE.mix(0.8))
-        .border_style(&BLACK)
+        .border_style(BLACK)
         .draw()?;
 
     root.present()?;
@@ -692,7 +692,7 @@ fn main() -> Result<()> {
     };
 
     let mut wtr = csv::Writer::from_writer(out);
-    wtr.write_record(&[
+    wtr.write_record([
         "commit",
         "timestamp",
         "datetime",
