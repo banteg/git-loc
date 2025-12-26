@@ -9,5 +9,6 @@ clap = { version = "4", features = ["derive"] }
 csv = "1"
 chrono = "0.4"
 git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
+plotters = { version = "0.3", default-features = false, features = ["chrono", "datetime", "full_palette", "line_series", "svg_backend"] }
 tempfile = "3"
 tokei = { version = "13", default-features = false }

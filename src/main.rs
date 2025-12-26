@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
-use chrono::{DateTime, FixedOffset, TimeZone, Utc};
+use chrono::{DateTime, Duration, FixedOffset, TimeZone, Utc};
 use clap::Parser;
 use git2::{DiffOptions, FileMode, Oid, Repository};
+use plotters::prelude::*;
 use std::{
     collections::HashMap,
     io::{self, Write},
@@ -30,6 +31,10 @@ struct Args {
     #[arg(long, default_value = "-")]
     out: String,
 
+    /// Output SVG plot path (top languages over time)
+    #[arg(long)]
+    plot: Option<PathBuf>,
+
     /// Max blob size (bytes) to feed into tokei (guardrail). Default: 50MB
     #[arg(long, default_value_t = 50 * 1024 * 1024)]
     max_bytes: usize,
@@ -52,6 +57,12 @@ impl Counts {
 }
 
 type LangMap = HashMap<LanguageType, Counts>;
+
+#[derive(Debug, Clone)]
+struct Snapshot {
+    ts: i64,
+    totals: LangMap,
+}
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct BlobKey {
@@ -278,6 +289,7 @@ fn run_first_parent<W: Write>(
     tmpdir: &Path,
     tokei_cfg: &TokeiConfig,
     blob_cache: &mut HashMap<BlobKey, Arc<LangMap>>,
+    mut plot_data: Option<&mut Vec<Snapshot>>,
     wtr: &mut csv::Writer<W>,
     max_bytes: usize,
 ) -> Result<()> {
@@ -311,10 +323,129 @@ fn run_first_parent<W: Write>(
             max_bytes,
         )?;
 
+        if let Some(buf) = plot_data.as_deref_mut() {
+            buf.push(Snapshot {
+                ts: commit.time().seconds(),
+                totals: totals.clone(),
+            });
+        }
+
         write_commit_rows(wtr, oid, commit.time(), &totals)?;
         prev_tree = Some(tree);
     }
 
+    Ok(())
+}
+
+fn write_plot(path: &Path, snapshots: &[Snapshot]) -> Result<()> {
+    if snapshots.is_empty() {
+        return Ok(());
+    }
+
+    if path == Path::new("-") {
+        anyhow::bail!("plot output must be a file path (SVG), not stdout");
+    }
+
+    let last = snapshots
+        .last()
+        .expect("snapshots is non-empty by construction");
+    let mut langs: Vec<(LanguageType, i64)> = last
+        .totals
+        .iter()
+        .map(|(lang, c)| (*lang, c.lines()))
+        .filter(|(_, lines)| *lines > 0)
+        .collect();
+    langs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.name().cmp(b.0.name())));
+
+    let top_langs: Vec<LanguageType> = langs
+        .into_iter()
+        .take(8)
+        .map(|(lang, _)| lang)
+        .collect();
+    if top_langs.is_empty() {
+        return Ok(());
+    }
+
+    let start_ts = snapshots
+        .first()
+        .expect("snapshots is non-empty by construction")
+        .ts;
+    let end_ts = last.ts;
+
+    let start_dt = Utc
+        .timestamp_opt(start_ts, 0)
+        .single()
+        .unwrap_or_else(|| Utc.timestamp_opt(0, 0).unwrap());
+    let mut end_dt = Utc
+        .timestamp_opt(end_ts, 0)
+        .single()
+        .unwrap_or_else(|| Utc.timestamp_opt(0, 0).unwrap());
+    if end_dt <= start_dt {
+        end_dt = start_dt + Duration::seconds(1);
+    }
+
+    let mut y_max: i64 = 0;
+    for snapshot in snapshots {
+        for lang in &top_langs {
+            let lines = snapshot
+                .totals
+                .get(lang)
+                .map(|c| c.lines())
+                .unwrap_or(0);
+            y_max = y_max.max(lines);
+        }
+    }
+    if y_max <= 0 {
+        y_max = 1;
+    }
+
+    let root = SVGBackend::new(path, (1200, 700)).into_drawing_area();
+    root.fill(&WHITE)?;
+
+    let mut chart = ChartBuilder::on(&root)
+        .margin(20)
+        .caption("git-loc lines over time", ("sans-serif", 26))
+        .x_label_area_size(45)
+        .y_label_area_size(70)
+        .build_cartesian_2d(start_dt..end_dt, 0i64..y_max)?;
+
+    chart
+        .configure_mesh()
+        .x_labels(8)
+        .y_labels(10)
+        .x_label_formatter(&|dt| dt.format("%Y-%m-%d").to_string())
+        .y_label_formatter(&|v| v.to_string())
+        .light_line_style(&WHITE.mix(0.2))
+        .draw()?;
+
+    for (idx, lang) in top_langs.iter().enumerate() {
+        let color = Palette99::pick(idx).stroke_width(2);
+        let series = snapshots.iter().map(|snapshot| {
+            let dt = Utc
+                .timestamp_opt(snapshot.ts, 0)
+                .single()
+                .unwrap_or_else(|| Utc.timestamp_opt(0, 0).unwrap());
+            let lines = snapshot
+                .totals
+                .get(lang)
+                .map(|c| c.lines())
+                .unwrap_or(0);
+            (dt, lines)
+        });
+
+        chart
+            .draw_series(LineSeries::new(series, color))?
+            .label(lang.name().to_string())
+            .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], color));
+    }
+
+    chart
+        .configure_series_labels()
+        .background_style(WHITE.mix(0.8))
+        .border_style(&BLACK)
+        .draw()?;
+
+    root.present()?;
     Ok(())
 }
 
@@ -360,16 +491,26 @@ fn main() -> Result<()> {
         "lines",
     ])?;
 
+    let mut plot_data: Option<Vec<Snapshot>> = args.plot.as_ref().map(|_| Vec::new());
+
     run_first_parent(
         &repo,
         tip,
         tmpdir,
         &tokei_cfg,
         &mut blob_cache,
+        plot_data.as_mut(),
         &mut wtr,
         args.max_bytes,
     )?;
 
     wtr.flush()?;
+
+    if let Some(plot_path) = args.plot.as_ref() {
+        if let Some(data) = plot_data.as_ref() {
+            write_plot(plot_path, data)?;
+        }
+    }
+
     Ok(())
 }
