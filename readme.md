@@ -1,6 +1,6 @@
 # git-loc
 
-Generate a **per-language SLOC time series** for a Git repository **without checking out** each commit.
+Generate a **per-language lines of code time series** for a Git repository **without checking out** each commit.
 
 This tool walks the linear history of a branch/ref, computes a tree diff at each commit, and updates running totals using **git blob contents** + **tokei** for language detection and counting.
 
@@ -9,7 +9,7 @@ This tool walks the linear history of a branch/ref, computes a tree diff at each
 - Caches per-blob tokei results in-memory, so identical blobs are only counted once per run.
 - Optional SVG plot of the top languages over time.
 
-> Note: “SLOC” is typically the `code` column (non-blank, non-comment lines). The CSV also includes `comments`, `blanks`, and `lines = code+comments+blanks`.
+> Note: “lines of code” usually refers to the `code` column (non-blank, non-comment lines). The CSV also includes `comments`, `blanks`, and `lines = code+comments+blanks`.
 
 ## Install
 
@@ -38,27 +38,27 @@ git-loc --repo .
 ### Emit CSV + SVG plot
 
 ```bash
-git-loc --repo . --out sloc.csv --plot sloc.svg
+git-loc --repo . --out loc.csv --plot loc.svg
 ```
 
 ### Plot options
 
 ```bash
 # Use code/comments/blanks/lines for the plot metric
-git-loc --repo . --out sloc.csv --plot sloc.svg --plot-metric code
+git-loc --repo . --out loc.csv --plot loc.svg --plot-metric code
 
 # Plot top 5 languages
-git-loc --repo . --out sloc.csv --plot sloc.svg --plot-top 5
+git-loc --repo . --out loc.csv --plot loc.svg --plot-top 5
 
 # Only include selected languages (repeatable or comma-separated)
-git-loc --repo . --out sloc.csv --plot sloc.svg --only Python --only "Jinja2"
-git-loc --repo . --out sloc.csv --plot sloc.svg --only Python,Jinja2
+git-loc --repo . --out loc.csv --plot loc.svg --only Python --only "Jinja2"
+git-loc --repo . --out loc.csv --plot loc.svg --only Python,Jinja2
 ```
 
 ### Only count a subdirectory
 
 ```bash
-git-loc --repo . --subdir src --out sloc.csv --plot sloc.svg
+git-loc --repo . --subdir src --out loc.csv --plot loc.svg
 ```
 
 ### Disable the progress bar
