@@ -1,0 +1,82 @@
+# git-loc
+
+Generate a **per-language SLOC time series** for a Git repository **without checking out** each commit.
+
+This tool walks the linear history of a branch/ref, computes a tree diff at each commit, and updates running totals using **git blob contents** + **tokei** for language detection and counting.
+
+- Uses **tokei** for language detection and for `code / comments / blanks` counts (including embedded-language blobs).
+- Avoids expensive checkouts: reads blobs directly from the Git object database.
+- Caches per-blob tokei results in-memory, so identical blobs are only counted once per run.
+- Optional SVG plot of the top languages over time.
+
+> Note: “SLOC” is typically the `code` column (non-blank, non-comment lines). The CSV also includes `comments`, `blanks`, and `lines = code+comments+blanks`.
+
+## Install
+
+### From crates.io
+
+```bash
+cargo install git-loc
+```
+
+### From source
+
+```bash
+git clone https://github.com/banteg/git-loc.git
+cd git-loc
+cargo install --path .
+```
+
+## Usage
+
+### Emit CSV (stdout)
+
+```bash
+git-loc --repo .
+```
+
+### Emit CSV + SVG plot
+
+```bash
+git-loc --repo . --out sloc.csv --plot sloc.svg
+```
+
+### Only count a subdirectory
+
+```bash
+git-loc --repo . --subdir src --out sloc.csv --plot sloc.svg
+```
+
+## Output format
+
+The CSV is long-form: one row per `(commit, language)`.
+
+Columns:
+
+- `commit`: commit SHA
+- `timestamp`: commit time (unix seconds)
+- `datetime`: commit time
+- `language`: language name (as reported by tokei)
+- `code`: code lines
+- `comments`: comment lines
+- `blanks`: blank lines
+- `lines`: `code + comments + blanks`
+
+This long format is convenient for plotting.
+
+## Plot
+
+`--plot <path.svg>` writes an SVG chart of the top 8 languages ranked by totals at the final commit.
+
+## How it works
+
+1. Resolve `--rev` (default `HEAD`).
+2. Build the first-parent chain from root → tip.
+3. For each commit:
+   - Diff `parent_tree → commit_tree`
+   - For each changed file:
+     - If the old blob exists: subtract its cached per-language tokei counts
+     - If the new blob exists: add its cached per-language tokei counts
+4. Emit the current per-language totals (and optionally add a plot point).
+
+Counting is done by writing blob bytes to a temporary file (with the original basename so tokei’s path-based detection works), then calling tokei as a library.
