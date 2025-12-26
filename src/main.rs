@@ -469,7 +469,12 @@ fn run_first_parent<W: Write>(ctx: &mut RunCtx<'_, W>) -> Result<(usize, LangMap
         }
 
         if let Some(buf) = ctx.plot_data.as_deref_mut() {
-            buf.push_snapshot(commit.time().seconds(), &totals, ctx.plot_metric, ctx.only_langs);
+            buf.push_snapshot(
+                commit.time().seconds(),
+                &totals,
+                ctx.plot_metric,
+                ctx.only_langs,
+            );
         }
 
         write_commit_rows(ctx.wtr, oid, commit.time(), &totals, ctx.only_langs)?;
