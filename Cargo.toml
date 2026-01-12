@@ -1,6 +1,6 @@
 [package]
 name = "git-loc"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 authors = ["banteg"]
 description = "Per-language lines of code time series from git history using git blobs + tokei"
