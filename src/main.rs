@@ -645,8 +645,20 @@ fn write_plot(
     Ok(())
 }
 
+fn enable_relative_worktrees() -> Result<()> {
+    // Allow Git's relativeWorktrees extension used by worktree setups.
+    unsafe {
+        git2::opts::set_extensions(&["relativeworktrees"])
+            .map_err(anyhow::Error::from)
+            .context("enable relativeWorktrees extension")?;
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
+
+    enable_relative_worktrees()?;
 
     let repo = Repository::discover(&args.repo)
         .with_context(|| format!("discover repo at {:?}", args.repo))?;
@@ -791,4 +803,21 @@ fn main() -> Result<()> {
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enables_relative_worktrees_extension() -> Result<()> {
+        enable_relative_worktrees()?;
+        let extensions = unsafe { git2::opts::get_extensions() }?;
+        let has_relative = extensions
+            .iter()
+            .flatten()
+            .any(|ext| ext == "relativeworktrees");
+        assert!(has_relative);
+        Ok(())
+    }
 }
