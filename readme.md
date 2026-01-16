@@ -50,6 +50,9 @@ git-loc --repo . --out loc.csv --plot loc.svg --plot-metric code
 # Plot top 5 languages
 git-loc --repo . --out loc.csv --plot loc.svg --plot-top 5
 
+# Show git tags on the plot
+git-loc --repo . --out loc.csv --plot loc.svg --plot-tags
+
 # Only include selected languages (repeatable or comma-separated)
 git-loc --repo . --out loc.csv --plot loc.svg --only Python --only "Jinja2"
 git-loc --repo . --out loc.csv --plot loc.svg --only Python,Jinja2
@@ -92,6 +95,7 @@ Plot-related flags:
 
 - `--plot-metric code|lines|comments|blanks` (default: `code`)
 - `--plot-top N` (default: `8`)
+- `--plot-tags` shows git tags on the plot
 - `--only <LANG>` repeatable or comma-separated
 - `--no-progress` disables the progress bar on stderr
 

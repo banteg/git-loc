@@ -4,8 +4,9 @@ use clap::{Parser, ValueEnum};
 use git2::{DiffOptions, FileMode, Oid, Repository};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use plotters::prelude::*;
+use plotters::style::text_anchor::{HPos, Pos, VPos};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     str::FromStr,
@@ -45,6 +46,10 @@ struct Args {
     /// Plot top N languages
     #[arg(long, default_value_t = 8)]
     plot_top: usize,
+
+    /// Show git tags on the plot
+    #[arg(long)]
+    plot_tags: bool,
 
     /// Only include selected languages (repeatable or comma-separated)
     #[arg(long, value_delimiter = ',', value_name = "LANG")]
@@ -112,6 +117,7 @@ impl PlotMetric {
 struct PlotData {
     times: Vec<i64>,
     series: HashMap<LanguageType, Vec<i64>>,
+    tags: Vec<PlotTag>,
 }
 
 impl PlotData {
@@ -149,6 +155,22 @@ impl PlotData {
             self.series.insert(lang, values);
         }
     }
+
+    fn push_tags(&mut self, ts: i64, names: &[String]) {
+        if names.is_empty() {
+            return;
+        }
+        self.tags.push(PlotTag {
+            ts,
+            names: names.to_vec(),
+        });
+    }
+}
+
+#[derive(Debug)]
+struct PlotTag {
+    ts: i64,
+    names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -173,6 +195,7 @@ struct RunCtx<'a, W: Write> {
     tokei_cfg: &'a TokeiConfig,
     blob_cache: &'a mut HashMap<BlobKey, Arc<LangMap>>,
     plot_data: Option<&'a mut PlotData>,
+    tag_map: Option<&'a HashMap<Oid, Vec<String>>>,
     wtr: &'a mut csv::Writer<W>,
     progress: Option<&'a ProgressBar>,
     only_langs: Option<&'a HashSet<LanguageType>>,
@@ -223,6 +246,28 @@ fn format_git_time(t: git2::Time) -> String {
         .naive_utc();
 
     offset.from_utc_datetime(&naive).to_rfc3339()
+}
+
+fn collect_tag_map(repo: &Repository) -> Result<HashMap<Oid, Vec<String>>> {
+    let mut tags: HashMap<Oid, Vec<String>> = HashMap::new();
+    let names = repo.tag_names(None).context("list tags")?;
+    for name in names.iter().flatten() {
+        let ref_name = format!("refs/tags/{name}");
+        let obj = match repo.revparse_single(&ref_name) {
+            Ok(obj) => obj,
+            Err(_) => continue,
+        };
+        let commit = match obj.peel_to_commit() {
+            Ok(commit) => commit,
+            Err(_) => continue,
+        };
+        tags.entry(commit.id()).or_default().push(name.to_string());
+    }
+    for names in tags.values_mut() {
+        names.sort();
+        names.dedup();
+    }
+    Ok(tags)
 }
 
 fn add_to_map(map: &mut LangMap, lang: LanguageType, code: usize, comments: usize, blanks: usize) {
@@ -454,6 +499,8 @@ fn run_first_parent<W: Write>(ctx: &mut RunCtx<'_, W>) -> Result<(usize, LangMap
 
     for oid in chain {
         let commit = ctx.repo.find_commit(oid)?;
+        let commit_time = commit.time();
+        let commit_ts = commit_time.seconds();
         let tree = commit.tree()?;
 
         {
@@ -468,16 +515,20 @@ fn run_first_parent<W: Write>(ctx: &mut RunCtx<'_, W>) -> Result<(usize, LangMap
             apply_tree_diff(&mut diff_ctx, &mut totals, prev_tree.as_ref(), &tree)?;
         }
 
+        let tag_names = ctx.tag_map.and_then(|map| map.get(&oid));
         if let Some(buf) = ctx.plot_data.as_deref_mut() {
             buf.push_snapshot(
-                commit.time().seconds(),
+                commit_ts,
                 &totals,
                 ctx.plot_metric,
                 ctx.only_langs,
             );
+            if let Some(tags) = tag_names {
+                buf.push_tags(commit_ts, tags);
+            }
         }
 
-        write_commit_rows(ctx.wtr, oid, commit.time(), &totals, ctx.only_langs)?;
+        write_commit_rows(ctx.wtr, oid, commit_time, &totals, ctx.only_langs)?;
         if let Some(pb) = ctx.progress {
             pb.inc(1);
         }
@@ -588,6 +639,34 @@ fn write_plot(
         .light_line_style(WHITE.mix(0.2))
         .draw()?;
 
+    let mut tag_points: BTreeMap<i64, Vec<String>> = BTreeMap::new();
+    for tag in &plot_data.tags {
+        tag_points
+            .entry(tag.ts)
+            .or_default()
+            .extend(tag.names.iter().cloned());
+    }
+    for names in tag_points.values_mut() {
+        names.sort();
+        names.dedup();
+    }
+
+    let tag_points: Vec<(i64, Vec<String>)> = tag_points.into_iter().collect();
+
+    if !tag_points.is_empty() {
+        let tag_line_style = BLACK.mix(0.2).stroke_width(1);
+        for (ts, _) in &tag_points {
+            let dt = Utc
+                .timestamp_opt(*ts, 0)
+                .single()
+                .unwrap_or_else(|| Utc.timestamp_opt(0, 0).unwrap());
+            chart.draw_series(std::iter::once(PathElement::new(
+                vec![(dt, 0), (dt, y_max)],
+                tag_line_style,
+            )))?;
+        }
+    }
+
     for (idx, lang) in top_langs.iter().enumerate() {
         let color = Palette99::pick(idx).stroke_width(2);
         let mut samples: Vec<(i64, i64)> = Vec::with_capacity(ordered.len());
@@ -633,6 +712,28 @@ fn write_plot(
             .draw_series(LineSeries::new(step_points, color))?
             .label(lang.name().to_string())
             .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], color));
+    }
+
+    if !tag_points.is_empty() {
+        const TAG_LABEL_COLOR: RGBColor = RGBColor(80, 80, 80);
+        let tag_label_style = TextStyle::from(("sans-serif", 12).into_font())
+            .color(&TAG_LABEL_COLOR)
+            .transform(FontTransform::Rotate90)
+            .pos(Pos::new(HPos::Center, VPos::Top));
+        let tag_label_y = y_max;
+
+        for (ts, names) in &tag_points {
+            let dt = Utc
+                .timestamp_opt(*ts, 0)
+                .single()
+                .unwrap_or_else(|| Utc.timestamp_opt(0, 0).unwrap());
+            let label = names.join(", ");
+            chart.draw_series(std::iter::once(Text::new(
+                label,
+                (dt, tag_label_y),
+                tag_label_style.clone(),
+            )))?;
+        }
     }
 
     chart
@@ -728,6 +829,11 @@ fn main() -> Result<()> {
     ])?;
 
     let mut plot_data: Option<PlotData> = args.plot.as_ref().map(|_| PlotData::default());
+    let tag_map = if args.plot.is_some() && args.plot_tags {
+        Some(collect_tag_map(&repo)?)
+    } else {
+        None
+    };
 
     let progress = if !args.no_progress && io::stderr().is_terminal() {
         let pb = ProgressBar::new(0);
@@ -754,6 +860,7 @@ fn main() -> Result<()> {
             tokei_cfg: &tokei_cfg,
             blob_cache: &mut blob_cache,
             plot_data: plot_data.as_mut(),
+            tag_map: tag_map.as_ref(),
             wtr: &mut wtr,
             progress: progress.as_ref(),
             only_langs: only_langs.as_ref(),
