@@ -47,6 +47,10 @@ struct Args {
     #[arg(long, default_value_t = 8)]
     plot_top: usize,
 
+    /// Show git tags on the plot
+    #[arg(long)]
+    plot_tags: bool,
+
     /// Only include selected languages (repeatable or comma-separated)
     #[arg(long, value_delimiter = ',', value_name = "LANG")]
     only: Vec<String>,
@@ -825,7 +829,7 @@ fn main() -> Result<()> {
     ])?;
 
     let mut plot_data: Option<PlotData> = args.plot.as_ref().map(|_| PlotData::default());
-    let tag_map = if args.plot.is_some() {
+    let tag_map = if args.plot.is_some() && args.plot_tags {
         Some(collect_tag_map(&repo)?)
     } else {
         None
